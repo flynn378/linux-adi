@@ -190,7 +190,7 @@ static void adis_buffer_cleanup(void *arg)
  */
 int
 devm_adis_setup_buffer_and_trigger(struct adis *adis, struct iio_dev *indio_dev,
-				   irq_handler_t trigger_handler)
+				   irq_handler_t trigger_handler,  const struct iio_buffer_setup_ops *ops)
 {
 	int ret;
 
@@ -199,7 +199,7 @@ devm_adis_setup_buffer_and_trigger(struct adis *adis, struct iio_dev *indio_dev,
 
 	ret = devm_iio_triggered_buffer_setup(&adis->spi->dev, indio_dev,
 					      &iio_pollfunc_store_time,
-					      trigger_handler, NULL);
+					      trigger_handler, ops);
 	if (ret)
 		return ret;
 
