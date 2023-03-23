@@ -207,3 +207,4 @@ obj-$(CONFIG_PMBUS)		+= pmbus/
 
 ccflags-$(CONFIG_HWMON_DEBUG_CHIP) := -DDEBUG
 
+obj-$(CONFIG_MAX31827) += max31827.o
