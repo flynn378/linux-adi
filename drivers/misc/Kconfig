@@ -72,7 +72,7 @@ config ADI_AXI_TDD
 	  and is not embedded into other devices.
 
 	  The exposed sysfs interface follows the IIO specification, but is
-	  not registered into the IIO device tree, and doesn not rely on IIO
+	  not registered into the IIO device tree, and does not rely on IIO
 	  kernel APIs. This means the device will now show up in IIO by default,
 	  but may be made available using an iio_fakedev
 

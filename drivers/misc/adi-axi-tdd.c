@@ -2,7 +2,7 @@
 /*
  * TDD HDL CORE driver
  *
- * Copyright 2022 Analog Devices Inc.
+ * Copyright 2023 Analog Devices Inc.
  *
  */
 #include <linux/bitfield.h>
@@ -10,59 +10,57 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/fpga/adi-axi-common.h>
-#include <linux/iio/iio.h>
-#include <linux/io.h>
 #include <linux/math64.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
 
 /* Register Map */
+#define ADI_REG_TDD_IDENTIFICATION          0x000c
+#define ADI_REG_TDD_INTERFACE_DESCRIPTION   0x0010
+#define ADI_REG_TDD_DEFAULT_POLARITY        0x0014
+#define ADI_REG_TDD_CONTROL                 0x0040
+#define ADI_REG_TDD_CHANNEL_ENABLE          0x0044
+#define ADI_REG_TDD_CHANNEL_POLARITY        0x0048
+#define ADI_REG_TDD_BURST_COUNT             0x004c
+#define ADI_REG_TDD_STARTUP_DELAY           0x0050
+#define ADI_REG_TDD_FRAME_LENGTH            0x0054
+#define ADI_REG_TDD_SYNC_COUNTER_LOW        0x0058
+#define ADI_REG_TDD_SYNC_COUNTER_HIGH       0x005c
+#define ADI_REG_TDD_STATUS                  0x0060
+#define ADI_REG_TDD_CHANNEL_BASE            0x0080
 
-#define ADI_REG_TDD_MAGIC 0x000c
-#define ADI_TDD_MAGIC 0x5444444E // TDDN
+/* Identification Register */
+#define ADI_TDD_MAGIC                       0x5444444E
 
-#define ADI_REG_TDD_INTERFACE_DESCRIPTION 0x0010
-#define ADI_TDD_SYNC_COUNT_WIDTH GENMASK(30, 24)
-#define ADI_TDD_SYNC_COUNT_WIDTH_GET(x) FIELD_GET(ADI_TDD_SYNC_COUNT_WIDTH, x)
-#define ADI_TDD_BURST_COUNT_WIDTH GENMASK(21, 16)
-#define ADI_TDD_BURST_COUNT_WIDTH_GET(x) FIELD_GET(ADI_TDD_BURST_COUNT_WIDTH, x)
-#define ADI_TDD_REG_WIDTH GENMASK(13, 8)
-#define ADI_TDD_REG_WIDTH_GET(x) FIELD_GET(ADI_TDD_REG_WIDTH, x)
-#define ADI_TDD_SYNC_EXTERNAL_CDC BIT(7)
-#define ADI_TDD_SYNC_EXTERNAL BIT(6)
-#define ADI_TDD_SYNC_INTERNAL BIT(5)
-#define ADI_TDD_CHANNEL_COUNT GENMASK(4, 0)
-#define ADI_TDD_CHANNEL_COUNT_GET(x) FIELD_GET(ADI_TDD_CHANNEL_COUNT, x)
+/* Interface Description Register */
+#define ADI_TDD_SYNC_COUNT_WIDTH            GENMASK(30, 24)
+#define ADI_TDD_BURST_COUNT_WIDTH           GENMASK(21, 16)
+#define ADI_TDD_REG_WIDTH                   GENMASK(13, 8)
+#define ADI_TDD_SYNC_EXTERNAL_CDC           BIT(7)
+#define ADI_TDD_SYNC_EXTERNAL               BIT(6)
+#define ADI_TDD_SYNC_INTERNAL               BIT(5)
+#define ADI_TDD_CHANNEL_COUNT               GENMASK(4, 0)
 
-#define ADI_REG_TDD_CONTROL 0x0040
-#define ADI_TDD_SYNC_SOFT BIT(4)
-#define ADI_TDD_SYNC_EXT BIT(3)
-#define ADI_TDD_SYNC_INT BIT(2)
-#define ADI_TDD_SYNC_RST BIT(1)
-#define ADI_TDD_ENABLE BIT(0)
+/* Control Register */
+#define ADI_TDD_SYNC_SOFT                   BIT(4)
+#define ADI_TDD_SYNC_EXT                    BIT(3)
+#define ADI_TDD_SYNC_INT                    BIT(2)
+#define ADI_TDD_SYNC_RST                    BIT(1)
+#define ADI_TDD_ENABLE                      BIT(0)
 
-#define ADI_REG_TDD_CHANNEL_ENABLE 0x0044
-#define ADI_REG_TDD_CHANNEL_POLARITY 0x0048
-#define ADI_REG_TDD_BURST_COUNT 0x004c
-#define ADI_REG_TDD_STARTUP_DELAY 0x0050
-#define ADI_REG_TDD_FRAME_LENGTH 0x0054
-#define ADI_REG_TDD_SYNC_COUNTER_LOW 0x0058
-#define ADI_REG_TDD_SYNC_COUNTER_HIGH 0x005c
+/* Channel Definitions */
+#define ADI_TDD_CHANNEL_OFFSET              0x0008
+#define ADI_TDD_CHANNEL_ON                  0x0000
+#define ADI_TDD_CHANNEL_OFF                 0x0004
 
-#define ADI_REG_TDD_STATUS 0x0060
-
-#define ADI_REG_TDD_CHANNEL_BASE 0x0080
-#define ADI_TDD_CHANNEL_OFFSET 0x0008
-#define ADI_TDD_CHANNEL_ON 0x0000
-#define ADI_TDD_CHANNEL_OFF 0x0004
-
-#define ADI_REG_TDD_CHANNEL(c, o)					\
-	(ADI_REG_TDD_CHANNEL_BASE + ADI_TDD_CHANNEL_OFFSET * (c) + o)
+#define ADI_REG_TDD_CHANNEL(c, o)           \
+	(ADI_REG_TDD_CHANNEL_BASE + ADI_TDD_CHANNEL_OFFSET * (c) + (o))
 
 enum adi_axi_tdd_attribute_id {
 	ADI_TDD_ATTR_VERSION,
@@ -96,13 +94,14 @@ enum adi_axi_tdd_attribute_id {
 
 struct adi_axi_tdd_clk {
 	struct notifier_block nb;
-	struct clk *clk;
 	unsigned long rate;
+	struct clk *clk;
+
 };
 
 struct adi_axi_tdd_attribute {
-	struct device_attribute attr;
 	enum adi_axi_tdd_attribute_id id;
+	struct device_attribute attr;
 	u32 channel;
 	u8 name[32];
 };
@@ -112,7 +111,8 @@ struct adi_axi_tdd_attribute {
 /**
  * struct adi_axi_tdd_state - Driver state information for the TDD CORE
  * @clk: Interface clock definition. Used to translate ms into cycle counts
- * @regs: Device register base address in memory
+ * @base: Device register base address in memory
+ * @regs: Device memory-mapped region regmap
  * @sync_count_width: Bit width of the internal synchronization counter, <= 64
  * @sync_count_mask: Bit mask of sync counter
  * @burst_count_width: Bit width of the burst counter, <= 32
@@ -125,11 +125,11 @@ struct adi_axi_tdd_attribute {
  * @channel_count: Available channel count
  * @enabled: Whether the TDD engine is currently enabled.
  *	     Note: Most configuration registers cannot be changed while the TDD core is enabled.
- * @lock: Protects state fields and protects against unordered accesses to the registers
  */
 struct adi_axi_tdd_state {
 	struct adi_axi_tdd_clk clk;
-	void __iomem *regs;
+	void __iomem *base;
+	struct regmap *regs;
 	u32 sync_count_width;
 	u64 sync_count_mask;
 	u32 burst_count_width;
@@ -141,84 +141,63 @@ struct adi_axi_tdd_state {
 	bool sync_internal;
 	u32 channel_count;
 	bool enabled;
-
-	/* TDD core access locking */
-	struct mutex lock;
 };
 
-static inline void _tdd_write(struct adi_axi_tdd_state *st, const u32 reg, const u32 val)
+static const struct regmap_config adi_axi_tdd_regmap_cfg = {
+	.name = "adi-axi-tdd",
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+};
+
+static int tdd_write(struct adi_axi_tdd_state *st, const u32 reg, const u32 val)
 {
-	iowrite32(val, st->regs + reg);
+	return regmap_write(st->regs, reg, val);
 }
 
-static inline u32 _tdd_read(struct adi_axi_tdd_state *st, const u32 reg)
+static int tdd_read(struct adi_axi_tdd_state *st, const u32 reg, u32 *val)
 {
-	return ioread32(st->regs + reg);
+	return regmap_read(st->regs, reg, val);
 }
 
-static inline void tdd_write(struct adi_axi_tdd_state *st, const u32 reg, const u32 val)
+static int tdd_write64(struct adi_axi_tdd_state *st, const u32 lreg,
+		       const u32 hreg, const u64 val)
 {
-	mutex_lock(&st->lock);
-	iowrite32(val, st->regs + reg);
-	mutex_unlock(&st->lock);
+	int ret;
+
+	ret = regmap_write(st->regs, lreg, FIELD_GET(GENMASK_ULL(31, 0), val));
+	if (ret)
+		return ret;
+
+	return regmap_write(st->regs, hreg, FIELD_GET(GENMASK_ULL(63, 32), val));
 }
 
-static inline void tdd_write64(struct adi_axi_tdd_state *st, const u32 lreg, const u32 hreg,
-			     const u64 val)
+static int tdd_read64(struct adi_axi_tdd_state *st, const u32 lreg, const u32 hreg, u64 *val)
 {
-	mutex_lock(&st->lock);
+	u32 data;
+	int ret;
 
-	_tdd_write(st, lreg, (u32) (val & 0xFFFFFFFFU));
-	_tdd_write(st, hreg, (u32) ((val >> 32) & 0xFFFFFFFFU));
+	ret = regmap_read(st->regs, hreg, &data);
+	if (ret)
+		return ret;
+	*val = FIELD_PREP(GENMASK_ULL(63, 32), data) |
+		FIELD_PREP(GENMASK_ULL(31, 0), 0);
+	ret = regmap_read(st->regs, lreg, &data);
+	if (ret)
+		return ret;
+	*val |= FIELD_PREP(GENMASK_ULL(31, 0), data);
 
-	mutex_unlock(&st->lock);
+	return ret;
 }
 
-static inline u32 tdd_read(struct adi_axi_tdd_state *st, const u32 reg)
+static int tdd_update_bits(struct adi_axi_tdd_state *st, const u32 reg,
+			   const u32 mask, const u32 val)
 {
-	u32 val;
-
-	mutex_lock(&st->lock);
-	val = ioread32(st->regs + reg);
-	mutex_unlock(&st->lock);
-
-	return val;
-}
-
-static inline u64 tdd_read64(struct adi_axi_tdd_state *st, const u32 lreg, const u32 hreg)
-{
-	u64 data;
-
-	mutex_lock(&st->lock);
-
-	data = ((u64) _tdd_read(st, hreg)) << 32;
-	data |= _tdd_read(st, lreg);
-
-	mutex_unlock(&st->lock);
-
-	return data;
-}
-
-static void _tdd_update_bits(struct adi_axi_tdd_state *st, const u32 reg,
-			     const u32 mask, const u32 val)
-{
-	u32 __val;
-
-	__val = _tdd_read(st, reg);
-	__val = (__val & ~mask) | (val & mask);
-	_tdd_write(st, reg, __val);
-}
-
-static void tdd_update_bits(struct adi_axi_tdd_state *st, const u32 reg,
-			    const u32 mask, const u32 val)
-{
-	mutex_lock(&st->lock);
-	_tdd_update_bits(st, reg, mask, val);
-	mutex_unlock(&st->lock);
+	return regmap_update_bits_base(st->regs, reg, mask, val, NULL, false, false);
 }
 
 static int adi_axi_tdd_rate_change(struct notifier_block *nb,
-				      unsigned long flags, void *data)
+				   unsigned long flags, void *data)
 {
 	struct adi_axi_tdd_clk *clk =
 		container_of(nb, struct adi_axi_tdd_clk, nb);
@@ -244,9 +223,9 @@ static void adi_axi_tdd_clk_notifier_unreg(void *data)
 
 static int adi_axi_tdd_clk_setup(struct platform_device *pdev, struct adi_axi_tdd_state *st)
 {
-	int ret;
 	struct adi_axi_tdd_clk *clk = &st->clk;
 	struct clk *aclk;
+	int ret;
 
 	aclk = devm_clk_get(&pdev->dev, "s_axi_aclk");
 	if (IS_ERR(aclk))
@@ -281,157 +260,202 @@ static int adi_axi_tdd_clk_setup(struct platform_device *pdev, struct adi_axi_td
 	return devm_add_action_or_reset(&pdev->dev, adi_axi_tdd_clk_notifier_unreg, clk);
 }
 
+static int adi_axi_tdd_str_to_fixpoint(const char *str, int fract_mult,
+				       int *integer, int *fract)
+{
+	bool integer_part = true;
+	int i = 0, f = 0;
+
+	if (fract_mult == 0) {
+		*fract = 0;
+		return kstrtoint(str, 0, integer);
+	}
+
+	while (*str) {
+		if ('0' <= *str && *str <= '9') {
+			if (integer_part) {
+				i = i * 10 + *str - '0';
+			} else {
+				f += fract_mult * (*str - '0');
+				fract_mult /= 10;
+			}
+		} else if (*str == '\n') {
+			if (*(str + 1) != '\0')
+				return -EINVAL;
+			break;
+		} else if (*str == '.' && integer_part) {
+			integer_part = false;
+		} else {
+			return -EINVAL;
+		}
+		str++;
+	}
+
+	*integer = i;
+	*fract = f;
+
+	return 0;
+}
+
 static int adi_axi_tdd_format_ms(struct adi_axi_tdd_state *st, u64 x, char *buf)
 {
-	u64 t_ns;
+	ssize_t len;
 	u32 vals[2];
+	u64 t_ns;
 
 	t_ns = div_u64(x * 1000000000ULL, READ_ONCE(st->clk.rate));
 	vals[0] = div_u64_rem(t_ns, 1000000, &vals[1]);
-	return iio_format_value(buf, IIO_VAL_INT_PLUS_MICRO, 2, vals);
+
+	len = scnprintf(buf, PAGE_SIZE, "%d.%06u", vals[0], vals[1]);
+
+	if (len >= PAGE_SIZE - 1)
+		return -EFBIG;
+
+	return len + sprintf(buf + len, "\n");
 }
 
 static ssize_t adi_axi_tdd_show(struct device *dev,
 				struct device_attribute *dev_attr, char *buf)
 {
-	struct adi_axi_tdd_state *st = dev_get_drvdata(dev);
 	const struct adi_axi_tdd_attribute *attr = to_tdd_attribute(dev_attr);
-	u32 data;
-	int ret = -ENODEV;
+	struct adi_axi_tdd_state *st = dev_get_drvdata(dev);
 	u32 channel = attr->channel;
 	bool ms = false;
+	u64 data64;
+	u32 data;
+	int ret;
 
 	switch (attr->id) {
 	case ADI_TDD_ATTR_VERSION:
-		data = _tdd_read(st, ADI_AXI_REG_VERSION);
-		ret = sysfs_emit(buf, "%d.%.2d.%c\n",
+		ret = tdd_read(st, ADI_AXI_REG_VERSION, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%d.%.2d.%c\n",
 				 ADI_AXI_PCORE_VER_MAJOR(data),
 				 ADI_AXI_PCORE_VER_MINOR(data),
 				 ADI_AXI_PCORE_VER_PATCH(data));
-		break;
-
 	case ADI_TDD_ATTR_CORE_ID:
-		data = _tdd_read(st, ADI_AXI_REG_ID);
-		ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_AXI_REG_ID, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u\n", data);
 	case ADI_TDD_ATTR_SCRATCH:
-		data = tdd_read(st, ADI_AXI_REG_SCRATCH);
-		ret = sysfs_emit(buf, "0x%08x\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_AXI_REG_SCRATCH, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "0x%08x\n", data);
 	case ADI_TDD_ATTR_MAGIC:
-		data = _tdd_read(st, ADI_AXI_REG_CONFIG);
-		ret = sysfs_emit(buf, "0x%08x\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_AXI_REG_CONFIG, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "0x%08x\n", data);
 	case ADI_TDD_ATTR_SYNC_EXT:
-		data = tdd_read(st, ADI_REG_TDD_CONTROL);
-		ret = sysfs_emit(buf, "%d\n", !!(data & ADI_TDD_SYNC_EXT));
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_CONTROL, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%d\n", !!(data & ADI_TDD_SYNC_EXT));
 	case ADI_TDD_ATTR_SYNC_INT:
-		data = tdd_read(st, ADI_REG_TDD_CONTROL);
-		ret = sysfs_emit(buf, "%d\n", !!(data & ADI_TDD_SYNC_INT));
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_CONTROL, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%d\n", !!(data & ADI_TDD_SYNC_INT));
 	case ADI_TDD_ATTR_SYNC_RST:
-		data = tdd_read(st, ADI_REG_TDD_CONTROL);
-		ret = sysfs_emit(buf, "%d\n", !!(data & ADI_TDD_SYNC_RST));
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_CONTROL, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%d\n", !!(data & ADI_TDD_SYNC_RST));
 	case ADI_TDD_ATTR_ENABLE:
-		data = tdd_read(st, ADI_REG_TDD_CONTROL);
+		ret = tdd_read(st, ADI_REG_TDD_CONTROL, &data);
+		if (ret)
+			return ret;
 		st->enabled = !!(data & ADI_TDD_ENABLE);
-		ret = sysfs_emit(buf, "%d\n", st->enabled);
-		break;
-
+		return sysfs_emit(buf, "%d\n", st->enabled);
 	case ADI_TDD_ATTR_BURST_COUNT:
-		data = tdd_read(st, ADI_REG_TDD_BURST_COUNT);
-		ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_BURST_COUNT, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u\n", data);
 	case ADI_TDD_ATTR_STARTUP_DELAY_RAW:
-		data = tdd_read(st, ADI_REG_TDD_STARTUP_DELAY);
-		ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_STARTUP_DELAY, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u\n", data);
 	case ADI_TDD_ATTR_STARTUP_DELAY_MS:
-		ret = adi_axi_tdd_format_ms(st, tdd_read(st, ADI_REG_TDD_STARTUP_DELAY), buf);
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_STARTUP_DELAY, &data);
+		if (ret)
+			return ret;
+		return adi_axi_tdd_format_ms(st, data, buf);
 	case ADI_TDD_ATTR_FRAME_LENGTH_RAW:
-		data = tdd_read(st, ADI_REG_TDD_FRAME_LENGTH);
-		ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_FRAME_LENGTH, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u\n", data);
 	case ADI_TDD_ATTR_FRAME_LENGTH_MS:
-		ret = adi_axi_tdd_format_ms(st, tdd_read(st, ADI_REG_TDD_FRAME_LENGTH), buf);
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_FRAME_LENGTH, &data);
+		if (ret)
+			return ret;
+		return adi_axi_tdd_format_ms(st, data, buf);
 	case ADI_TDD_ATTR_INTERNAL_SYNC_PERIOD_RAW:
-		ret = sysfs_emit(buf, "%llu\n", tdd_read64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
-							   ADI_REG_TDD_SYNC_COUNTER_HIGH));
-		break;
-
+		ret = tdd_read64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
+				 ADI_REG_TDD_SYNC_COUNTER_HIGH, &data64);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%llu\n", data64);
 	case ADI_TDD_ATTR_INTERNAL_SYNC_PERIOD_MS:
-		ret = adi_axi_tdd_format_ms(st, tdd_read64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
-							   ADI_REG_TDD_SYNC_COUNTER_HIGH), buf);
-		break;
-
+		ret = tdd_read64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
+				 ADI_REG_TDD_SYNC_COUNTER_HIGH, &data64);
+		if (ret)
+			return ret;
+		return adi_axi_tdd_format_ms(st, data64, buf);
 	case ADI_TDD_ATTR_STATE:
-		data = _tdd_read(st, ADI_REG_TDD_STATUS);
-		ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_STATUS, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u\n", data);
 	case ADI_TDD_ATTR_CHANNEL_ENABLE:
-		data = _tdd_read(st, ADI_REG_TDD_CHANNEL_ENABLE);
-		ret = sysfs_emit(buf, "%d\n", !!((1U << channel) & data));
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_CHANNEL_ENABLE, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%d\n", !!(BIT(channel) & data));
 	case ADI_TDD_ATTR_CHANNEL_POLARITY:
-		data = _tdd_read(st, ADI_REG_TDD_CHANNEL_POLARITY);
-		ret = sysfs_emit(buf, "%d\n", !!((1U << channel) & data));
-		break;
-
+		ret = tdd_read(st, ADI_REG_TDD_CHANNEL_POLARITY, &data);
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%d\n", !!(BIT(channel) & data));
 	case ADI_TDD_ATTR_CHANNEL_ON_MS:
 		ms = true;
 		fallthrough;
 	case ADI_TDD_ATTR_CHANNEL_ON_RAW:
-		data = _tdd_read(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_ON));
+		ret = tdd_read(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_ON), &data);
+		if (ret)
+			return ret;
 		if (ms)
-			ret = adi_axi_tdd_format_ms(st, data, buf);
-		else
-			ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+			return adi_axi_tdd_format_ms(st, data, buf);
+		return sysfs_emit(buf, "%u\n", data);
 	case ADI_TDD_ATTR_CHANNEL_OFF_MS:
 		ms = true;
 		fallthrough;
 	case ADI_TDD_ATTR_CHANNEL_OFF_RAW:
-		data = _tdd_read(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_OFF));
+		ret = tdd_read(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_OFF), &data);
+		if (ret)
+			return ret;
 		if (ms)
-			ret = adi_axi_tdd_format_ms(st, data, buf);
-		else
-			ret = sysfs_emit(buf, "%u\n", data);
-		break;
-
+			return adi_axi_tdd_format_ms(st, data, buf);
+		return sysfs_emit(buf, "%u\n", data);
 	default:
 		// Must not happen
 		dev_err(dev, "Failed to handle unknown attribute id: %d\n", attr->id);
-		break;
+		return -EINVAL;
 	}
-
-	return ret;
 }
 
 static u64 adi_axi_tdd_parse_ms(struct adi_axi_tdd_state *st, const char *buf)
 {
 	u64 clk_rate = READ_ONCE(st->clk.rate);
-	int ret;
 	int ival, frac;
+	int ret;
 
-	ret = iio_str_to_fixpoint(buf, 100000, &ival, &frac);
+	ret = adi_axi_tdd_str_to_fixpoint(buf, 100000, &ival, &frac);
 	return DIV_ROUND_CLOSEST_ULL((u64)ival * clk_rate, 1000)
 		+ DIV_ROUND_CLOSEST_ULL((u64)frac * clk_rate, 1000000000);
 }
@@ -440,189 +464,172 @@ static ssize_t adi_axi_tdd_store(struct device *dev,
 				 struct device_attribute *dev_attr,
 				 const char *buf, size_t count)
 {
-	struct adi_axi_tdd_state *st = dev_get_drvdata(dev);
 	const struct adi_axi_tdd_attribute *attr = to_tdd_attribute(dev_attr);
-	int ret = count;
-	u32 data;
-	u64 data64;
+	struct adi_axi_tdd_state *st = dev_get_drvdata(dev);
 	u32 channel = attr->channel;
-
-#define PARSE_AS_U32() {			\
-		ret = kstrtou32(buf, 0, &data);	\
-		if (ret) {			\
-			ret = -EINVAL;		\
-			break;			\
-		}				\
-		ret = count;			\
-}
-
-#define PARSE_AS_U64() {				\
-		ret = kstrtou64(buf, 0, &data64);	\
-		if (ret) {				\
-			ret = -EINVAL;			\
-			break;				\
-		}					\
-		ret = count;				\
-}
+	u64 data64;
+	u32 data;
+	int ret;
 
 	switch (attr->id) {
 	case ADI_TDD_ATTR_SCRATCH:
-		PARSE_AS_U32();
-		_tdd_write(st, ADI_AXI_REG_SCRATCH, data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_write(st, ADI_AXI_REG_SCRATCH, data);
 		break;
-
 	case ADI_TDD_ATTR_SYNC_SOFT:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_SOFT,
-				ADI_TDD_SYNC_SOFT * !!data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_SOFT,
+				      ADI_TDD_SYNC_SOFT * !!data);
 		break;
-
 	case ADI_TDD_ATTR_SYNC_EXT:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_EXT,
-				ADI_TDD_SYNC_EXT * !!data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_EXT,
+				      ADI_TDD_SYNC_EXT * !!data);
 		break;
-
 	case ADI_TDD_ATTR_SYNC_INT:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_INT,
-				ADI_TDD_SYNC_INT * !!data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_INT,
+				      ADI_TDD_SYNC_INT * !!data);
 		break;
-
 	case ADI_TDD_ATTR_SYNC_RST:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_RST,
-				ADI_TDD_SYNC_RST * !!data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_SYNC_RST,
+				      ADI_TDD_SYNC_RST * !!data);
 		break;
-
 	case ADI_TDD_ATTR_ENABLE:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_ENABLE,
-				ADI_TDD_ENABLE * !!data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CONTROL, ADI_TDD_ENABLE,
+				      ADI_TDD_ENABLE * !!data);
 		break;
-
 	case ADI_TDD_ATTR_BURST_COUNT:
-		PARSE_AS_U32();
-		_tdd_write(st, ADI_REG_TDD_BURST_COUNT, data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_write(st, ADI_REG_TDD_BURST_COUNT, data);
 		break;
-
 	case ADI_TDD_ATTR_STARTUP_DELAY_RAW:
-		PARSE_AS_U32();
-		_tdd_write(st, ADI_REG_TDD_STARTUP_DELAY, data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_write(st, ADI_REG_TDD_STARTUP_DELAY, data);
 		break;
-
 	case ADI_TDD_ATTR_STARTUP_DELAY_MS:
 		data64 = adi_axi_tdd_parse_ms(st, buf);
-		if (data64 >> 32) {
-			ret = -EINVAL;
-			break;
-		}
-
-		_tdd_write(st, ADI_REG_TDD_STARTUP_DELAY, (u32) data64);
+		if (FIELD_GET(GENMASK_ULL(63, 32), data64))
+			return -EINVAL;
+		ret = tdd_write(st, ADI_REG_TDD_STARTUP_DELAY, (u32)data64);
 		break;
-
 	case ADI_TDD_ATTR_FRAME_LENGTH_RAW:
-		PARSE_AS_U32();
-		_tdd_write(st, ADI_REG_TDD_FRAME_LENGTH, data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_write(st, ADI_REG_TDD_FRAME_LENGTH, data);
 		break;
-
 	case ADI_TDD_ATTR_FRAME_LENGTH_MS:
 		data64 = adi_axi_tdd_parse_ms(st, buf);
-		if (data64 >> 32) {
-			ret = -EINVAL;
-			break;
-		}
-
-		_tdd_write(st, ADI_REG_TDD_FRAME_LENGTH, (u32) data64);
+		if (FIELD_GET(GENMASK_ULL(63, 32), data64))
+			return -EINVAL;
+		ret = tdd_write(st, ADI_REG_TDD_FRAME_LENGTH, (u32)data64);
 		break;
-
 	case ADI_TDD_ATTR_INTERNAL_SYNC_PERIOD_RAW:
-		PARSE_AS_U64();
-		tdd_write64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
-			    ADI_REG_TDD_SYNC_COUNTER_HIGH, data64);
+		ret = kstrtou64(buf, 0, &data64);
+		if (ret)
+			return ret;
+		ret = tdd_write64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
+				  ADI_REG_TDD_SYNC_COUNTER_HIGH, data64);
 		break;
-
 	case ADI_TDD_ATTR_INTERNAL_SYNC_PERIOD_MS:
 		data64 = adi_axi_tdd_parse_ms(st, buf);
-		tdd_write64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
-			    ADI_REG_TDD_SYNC_COUNTER_HIGH, data64);
+		ret = tdd_write64(st, ADI_REG_TDD_SYNC_COUNTER_LOW,
+				  ADI_REG_TDD_SYNC_COUNTER_HIGH, data64);
 		break;
-
 	case ADI_TDD_ATTR_CHANNEL_ENABLE:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CHANNEL_ENABLE, (1U << channel),
-				(!!data) << channel);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CHANNEL_ENABLE, BIT(channel),
+				      BIT(channel) * !!data);
 		break;
-
 	case ADI_TDD_ATTR_CHANNEL_POLARITY:
-		PARSE_AS_U32();
-		tdd_update_bits(st, ADI_REG_TDD_CHANNEL_POLARITY, (1U << channel),
-				(!!data) << channel);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_update_bits(st, ADI_REG_TDD_CHANNEL_POLARITY, BIT(channel),
+				      BIT(channel) * !!data);
 		break;
-
 	case ADI_TDD_ATTR_CHANNEL_ON_RAW:
-		PARSE_AS_U32();
-		tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_ON), data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_ON), data);
 		break;
-
 	case ADI_TDD_ATTR_CHANNEL_ON_MS:
 		data64 = adi_axi_tdd_parse_ms(st, buf);
-		if (data64 >> 32) {
-			ret = -EINVAL;
-			break;
-		}
-
-		tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_ON), (u32) data64);
+		if (FIELD_GET(GENMASK_ULL(63, 32), data64))
+			return -EINVAL;
+		ret = tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_ON), (u32)data64);
 		break;
-
 	case ADI_TDD_ATTR_CHANNEL_OFF_RAW:
-		PARSE_AS_U32();
-		tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_OFF), data);
+		ret = kstrtou32(buf, 0, &data);
+		if (ret)
+			return ret;
+		ret = tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_OFF), data);
 		break;
-
 	case ADI_TDD_ATTR_CHANNEL_OFF_MS:
 		data64 = adi_axi_tdd_parse_ms(st, buf);
-		if (data64 >> 32) {
-			ret = -EINVAL;
-			break;
-		}
-
-		tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_OFF), (u32) data64);
+		if (FIELD_GET(GENMASK_ULL(63, 32), data64))
+			return -EINVAL;
+		ret = tdd_write(st, ADI_REG_TDD_CHANNEL(channel, ADI_TDD_CHANNEL_OFF), (u32)data64);
 		break;
-
 	default:
 		// Must not happen
 		dev_err(dev, "Failed to handle unknown attribute id: %d\n", attr->id);
-		break;
+		return -EINVAL;
 	}
 
-#undef PARSE_AS_U32
-#undef PARSE_AS_U64
+	if (ret)
+		return ret;
 
-	return ret;
+	return count;
 }
 
-static int
-adi_axi_tdd_init_synthesis_parameters(struct adi_axi_tdd_state *st)
+static int adi_axi_tdd_init_synthesis_parameters(struct adi_axi_tdd_state *st)
 {
-	u32 interface_config = _tdd_read(st, ADI_REG_TDD_INTERFACE_DESCRIPTION);
+	u32 interface_config;
+	int ret;
 
-	st->sync_count_width = ADI_TDD_SYNC_COUNT_WIDTH_GET(interface_config);
-	st->burst_count_width = ADI_TDD_BURST_COUNT_WIDTH_GET(interface_config);
-	st->reg_width = ADI_TDD_REG_WIDTH_GET(interface_config);
+	ret = tdd_read(st, ADI_REG_TDD_INTERFACE_DESCRIPTION, &interface_config);
+	if (ret)
+		return ret;
+
+	st->sync_count_width = FIELD_GET(ADI_TDD_SYNC_COUNT_WIDTH, interface_config);
+	st->burst_count_width = FIELD_GET(ADI_TDD_BURST_COUNT_WIDTH, interface_config);
+	st->reg_width = FIELD_GET(ADI_TDD_REG_WIDTH, interface_config);
 	st->sync_external_cdc = ADI_TDD_SYNC_EXTERNAL_CDC & interface_config;
 	st->sync_external = ADI_TDD_SYNC_EXTERNAL & interface_config;
 	st->sync_internal = ADI_TDD_SYNC_INTERNAL & interface_config;
-	st->channel_count = ADI_TDD_CHANNEL_COUNT_GET(interface_config) + 1;
+	st->channel_count = FIELD_GET(ADI_TDD_CHANNEL_COUNT, interface_config) + 1;
 
 	if (!st->burst_count_width || !st->reg_width)
 		return -EINVAL;
 
-	st->sync_count_mask = (u64)((1ULL << st->sync_count_width) - 1ULL);
-	st->burst_count_mask = (u32)((1ULL << st->burst_count_width) - 1ULL);
-	st->reg_mask = (u32)((1ULL << st->reg_width) - 1ULL);
+	st->sync_count_mask = BIT_ULL(st->sync_count_width) - 1ULL;
+	st->burst_count_mask = BIT_ULL(st->burst_count_width) - 1ULL;
+	st->reg_mask = BIT_ULL(st->reg_width) - 1ULL;
 
-	return 0;
+	return ret;
 }
 
 /* Match table for of_platform binding */
@@ -690,35 +697,38 @@ static struct attribute *adi_axi_tdd_base_attributes[] = {
 	/* NOT TERMINATED */
 };
 
+static const char * const channel_names[] = {
+	"out_channel%u_enable", "out_channel%u_polarity",
+	"out_channel%u_on_raw", "out_channel%u_off_raw",
+	"out_channel%u_on_ms", "out_channel%u_off_ms"
+};
+
+static const enum adi_axi_tdd_attribute_id channel_ids[] = {
+	ADI_TDD_ATTR_CHANNEL_ENABLE, ADI_TDD_ATTR_CHANNEL_POLARITY,
+	ADI_TDD_ATTR_CHANNEL_ON_RAW, ADI_TDD_ATTR_CHANNEL_OFF_RAW,
+	ADI_TDD_ATTR_CHANNEL_ON_MS, ADI_TDD_ATTR_CHANNEL_OFF_MS
+};
+
 static int adi_axi_tdd_init_sysfs(struct platform_device *pdev, struct adi_axi_tdd_state *st)
 {
-	struct attribute **tdd_attrs;
+	size_t base_attr_count = ARRAY_SIZE(adi_axi_tdd_base_attributes);
+	size_t attribute_count = base_attr_count + 6 * st->channel_count + 1;
 	struct adi_axi_tdd_attribute *channel_attributes;
 	struct adi_axi_tdd_attribute *channel_iter;
 	struct attribute_group *attr_group;
-	int ret;
+	struct attribute **tdd_attrs;
 	u32 i, j;
 
-	size_t base_attr_count = ARRAY_SIZE(adi_axi_tdd_base_attributes);
-	size_t attribute_count = base_attr_count + 6 * st->channel_count + 1;
+	channel_attributes = devm_kzalloc(&pdev->dev,
+					  6 * st->channel_count * sizeof(*channel_attributes), GFP_KERNEL);
+	if (!channel_attributes)
+		return -ENOMEM;
 
-	static const char * const channel_names[] = {
-		"out_channel%u_enable", "out_channel%u_polarity",
-		"out_channel%u_on_raw", "out_channel%u_off_raw",
-		"out_channel%u_on_ms",	"out_channel%u_off_ms"
-	};
+	tdd_attrs = devm_kzalloc(&pdev->dev,
+				 attribute_count * sizeof(*tdd_attrs), GFP_KERNEL);
+	if (!tdd_attrs)
+		return -ENOMEM;
 
-	static const enum adi_axi_tdd_attribute_id channel_ids[] = {
-		ADI_TDD_ATTR_CHANNEL_ENABLE, ADI_TDD_ATTR_CHANNEL_POLARITY,
-		ADI_TDD_ATTR_CHANNEL_ON_RAW, ADI_TDD_ATTR_CHANNEL_OFF_RAW,
-		ADI_TDD_ATTR_CHANNEL_ON_MS,  ADI_TDD_ATTR_CHANNEL_OFF_MS
-	};
-
-	channel_attributes = devm_kcalloc(&pdev->dev, 6 * st->channel_count,
-					  sizeof(*channel_attributes), GFP_KERNEL);
-
-	tdd_attrs = devm_kcalloc(&pdev->dev, attribute_count,
-				 sizeof(*tdd_attrs), GFP_KERNEL);
 	memcpy(tdd_attrs, adi_axi_tdd_base_attributes, sizeof(adi_axi_tdd_base_attributes));
 
 	channel_iter = channel_attributes;
@@ -740,35 +750,27 @@ static int adi_axi_tdd_init_sysfs(struct platform_device *pdev, struct adi_axi_t
 		}
 	}
 
-	// Terminate list, technically not necessary because kcalloc was used
+/* Terminate list, technically not necessary because kzalloc was used */
 	tdd_attrs[base_attr_count + 6 * st->channel_count] = NULL;
 
-	attr_group = devm_kcalloc(&pdev->dev, 1, sizeof(attr_group), GFP_KERNEL);
+	attr_group = devm_kzalloc(&pdev->dev, sizeof(attr_group), GFP_KERNEL);
 	if (!attr_group)
 		return -ENOMEM;
 
 	attr_group->attrs = tdd_attrs;
 
-	ret = devm_device_add_group(&pdev->dev, attr_group);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register attribute group: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
+	return devm_device_add_group(&pdev->dev, attr_group);
 }
 
 static int adi_axi_tdd_probe(struct platform_device *pdev)
 {
-	unsigned int expected_version, version;
+	unsigned int expected_version, version, data;
 	struct adi_axi_tdd_state *st;
 	int ret;
 
-	st = devm_kcalloc(&pdev->dev, 1, sizeof(*st), GFP_KERNEL);
+	st = devm_kzalloc(&pdev->dev, sizeof(*st), GFP_KERNEL);
 	if (!st)
 		return -ENOMEM;
-
-	mutex_init(&st->lock);
 
 	platform_set_drvdata(pdev, st);
 
@@ -776,11 +778,19 @@ static int adi_axi_tdd_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	st->regs = devm_platform_ioremap_resource(pdev, 0);
+	st->base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(st->base))
+		return PTR_ERR(st->base);
+
+	st->regs = devm_regmap_init_mmio(&pdev->dev, st->base,
+					 &adi_axi_tdd_regmap_cfg);
 	if (IS_ERR(st->regs))
 		return PTR_ERR(st->regs);
 
-	version = _tdd_read(st, ADI_AXI_REG_VERSION);
+	ret = tdd_read(st, ADI_AXI_REG_VERSION, &version);
+	if (ret)
+		return ret;
+
 	expected_version = ADI_AXI_PCORE_VER(2, 0, 'a');
 
 	if (ADI_AXI_PCORE_VER_MAJOR(version) !=
@@ -803,7 +813,11 @@ static int adi_axi_tdd_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	st->enabled = _tdd_read(st, ADI_REG_TDD_CONTROL) & ADI_TDD_ENABLE;
+	ret = tdd_read(st, ADI_REG_TDD_CONTROL, &data);
+	if (ret)
+		return ret;
+
+	st->enabled =  data & ADI_TDD_ENABLE;
 
 	ret = adi_axi_tdd_init_sysfs(pdev, st);
 	if (ret) {
