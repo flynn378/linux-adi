@@ -39,9 +39,3 @@
 
 	};
 };
-
-&spi0 {
-	status = "okay";
-};
-
-#define fmc_spi spi0
